@@ -1,0 +1,565 @@
+# Chapter 1: Understanding Kubernetes Architecture - Code Examples
+
+## Basic Pod Definition
+
+### simple-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-nginx-pod
+  labels:
+    app: nginx
+    environment: development
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+
+---
+
+## Multi-Container Pod (Sidecar Pattern)
+
+### sidecar-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webapp-with-logging
+  labels:
+    app: webapp
+spec:
+  containers:
+  - name: webapp
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    volumeMounts:
+    - name: shared-logs
+      mountPath: /var/log/nginx
+  - name: log-shipper
+    image: fluent/fluent-bit:1.8
+    volumeMounts:
+    - name: shared-logs
+      mountPath: /var/log/nginx
+      readOnly: true
+    - name: fluent-bit-config
+      mountPath: /fluent-bit/etc
+  volumes:
+  - name: shared-logs
+    emptyDir: {}
+  - name: fluent-bit-config
+    configMap:
+      name: fluent-bit-config
+
+---
+
+## Service Definitions
+
+### clusterip-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-clusterip
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+
+---
+
+### nodeport-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-nodeport
+spec:
+  type: NodePort
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30080
+    protocol: TCP
+
+---
+
+### loadbalancer-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-loadbalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+
+---
+
+## Deployment Examples
+
+### basic-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+
+### rolling-update-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-rolling-update
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 2
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: v2
+    spec:
+      containers:
+      - name: webapp
+        image: nginx:1.22
+        ports:
+        - containerPort: 80
+
+---
+
+## StatefulSet Example
+
+### mysql-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-statefulset
+spec:
+  serviceName: mysql-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: password
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: mysql-storage
+          mountPath: /var/lib/mysql
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+
+### mysql-headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+
+---
+
+## DaemonSet Example
+
+### node-exporter-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: node-exporter
+        image: prom/node-exporter:v1.3.1
+        ports:
+        - containerPort: 9100
+          hostPort: 9100
+        args:
+        - --path.rootfs=/host
+        - --collector.filesystem.ignored-mount-points
+        - ^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: root
+          mountPath: /host
+          readOnly: true
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: root
+        hostPath:
+          path: /
+
+---
+
+## ConfigMap Examples
+
+### nginx-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    http {
+        server {
+            listen 80;
+            server_name localhost;
+            
+            location / {
+                root /usr/share/nginx/html;
+                index index.html;
+            }
+            
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Welcome to Kubernetes</title>
+    </head>
+    <body>
+        <h1>Hello from Kubernetes Pod!</h1>
+        <p>Pod Name: ${POD_NAME}</p>
+        <p>Node Name: ${NODE_NAME}</p>
+    </body>
+    </html>
+
+---
+
+### app-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  DATABASE_HOST: "mysql-service"
+  DATABASE_PORT: "3306"
+  DATABASE_NAME: "myapp"
+  CACHE_ENABLED: "true"
+  CACHE_TTL: "3600"
+  LOG_LEVEL: "info"
+  APP_ENV: "production"
+
+---
+
+## Secret Examples
+
+### mysql-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+type: Opaque
+data:
+  username: cm9vdA==  # base64 encoded 'root'
+  password: bXlwYXNzd29yZA==  # base64 encoded 'mypassword'
+
+---
+
+### tls-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-secret
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTi... # base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTi... # base64 encoded private key
+
+---
+
+### docker-registry-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: docker-registry-secret
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJyZWdpc3RyeS5leGFtcGxlLmNvbSI6eyJ1c2VybmFtZSI6InVzZXIiLCJwYXNzd29yZCI6InBhc3MiLCJhdXRoIjoiZFhObGNqcHdZWE56In19fQ==
+
+---
+
+## Job Examples
+
+### backup-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-backup-job
+spec:
+  template:
+    spec:
+      containers:
+      - name: backup
+        image: postgres:13
+        command: ["sh", "-c"]
+        args:
+        - |
+          pg_dump -h $DATABASE_HOST -U $DATABASE_USER $DATABASE_NAME > /backup/backup-$(date +%Y%m%d-%H%M%S).sql
+        env:
+        - name: DATABASE_HOST
+          value: "postgres-service"
+        - name: DATABASE_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: DATABASE_NAME
+          value: "myapp"
+        volumeMounts:
+        - name: backup-storage
+          mountPath: /backup
+      volumes:
+      - name: backup-storage
+        persistentVolumeClaim:
+          claimName: backup-pvc
+      restartPolicy: OnFailure
+
+---
+
+### parallel-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parallel-processing-job
+spec:
+  parallelism: 3
+  completions: 9
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: busybox
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "Processing item $RANDOM"
+          sleep 30
+          echo "Processing complete"
+      restartPolicy: OnFailure
+
+---
+
+## CronJob Examples
+
+### scheduled-backup-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduled-backup
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: postgres:13
+            command: ["sh", "-c"]
+            args:
+            - |
+              timestamp=$(date +%Y%m%d-%H%M%S)
+              pg_dump -h $DATABASE_HOST -U $DATABASE_USER $DATABASE_NAME > /backup/backup-$timestamp.sql
+              echo "Backup completed: backup-$timestamp.sql"
+            env:
+            - name: DATABASE_HOST
+              value: "postgres-service"
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+            - name: DATABASE_NAME
+              value: "myapp"
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          restartPolicy: OnFailure
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+---
+
+## Kubectl Command Examples
+
+# Basic kubectl commands for Chapter 1 concepts
+
+# Pod Management
+kubectl get pods
+kubectl get pods -o wide
+kubectl describe pod <pod-name>
+kubectl logs <pod-name>
+kubectl logs <pod-name> -c <container-name>
+kubectl exec -it <pod-name> -- /bin/bash
+kubectl delete pod <pod-name>
+
+# Service Management
+kubectl get services
+kubectl get svc
+kubectl describe service <service-name>
+kubectl get endpoints
+kubectl port-forward service/<service-name> 8080:80
+
+# Deployment Management
+kubectl get deployments
+kubectl describe deployment <deployment-name>
+kubectl scale deployment <deployment-name> --replicas=5
+kubectl rollout status deployment/<deployment-name>
+kubectl rollout history deployment/<deployment-name>
+kubectl rollout undo deployment/<deployment-name>
+
+# ConfigMap and Secret Management
+kubectl create configmap app-config --from-literal=key1=value1
+kubectl create secret generic app-secret --from-literal=password=secret123
+kubectl get configmaps
+kubectl get secrets
+kubectl describe configmap <configmap-name>
+
+# Resource Management
+kubectl get all
+kubectl get all -n <namespace>
+kubectl apply -f <filename.yaml>
+kubectl delete -f <filename.yaml>
+kubectl create namespace <namespace-name>
+
+# Debugging and Troubleshooting
+kubectl get events
+kubectl get events --sort-by='.lastTimestamp'
+kubectl top nodes
+kubectl top pods
+kubectl describe node <node-name>
