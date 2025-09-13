@@ -26,118 +26,652 @@ spec:
 
 ---
 
-## Multi-Container Pod (Sidecar Pattern)
+## Part 2: Advanced Design Patterns Code Examples
 
-### sidecar-pod.yaml
+## Namespace Configuration and Multi-Tenancy
+
+### namespace-with-quota.yaml
 apiVersion: v1
-kind: Pod
+kind: Namespace
 metadata:
-  name: webapp-with-logging
+  name: development
   labels:
-    app: webapp
-spec:
-  containers:
-  - name: webapp
-    image: nginx:1.21
-    ports:
-    - containerPort: 80
-    volumeMounts:
-    - name: shared-logs
-      mountPath: /var/log/nginx
-  - name: log-shipper
-    image: fluent/fluent-bit:1.8
-    volumeMounts:
-    - name: shared-logs
-      mountPath: /var/log/nginx
-      readOnly: true
-    - name: fluent-bit-config
-      mountPath: /fluent-bit/etc
-  volumes:
-  - name: shared-logs
-    emptyDir: {}
-  - name: fluent-bit-config
-    configMap:
-      name: fluent-bit-config
-
+    environment: development
+    team: backend
 ---
-
-## Service Definitions
-
-### clusterip-service.yaml
 apiVersion: v1
-kind: Service
+kind: ResourceQuota
 metadata:
-  name: nginx-clusterip
+  name: dev-team-quota
+  namespace: development
 spec:
-  type: ClusterIP
-  selector:
-    app: nginx
-  ports:
-  - port: 80
-    targetPort: 80
-    protocol: TCP
-
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "10"
+    persistentvolumeclaims: "4"
+    services: "5"
+    secrets: "10"
+    configmaps: "10"
 ---
-
-### nodeport-service.yaml
 apiVersion: v1
-kind: Service
+kind: LimitRange
 metadata:
-  name: nginx-nodeport
+  name: dev-limit-range
+  namespace: development
 spec:
-  type: NodePort
-  selector:
-    app: nginx
-  ports:
-  - port: 80
-    targetPort: 80
-    nodePort: 30080
-    protocol: TCP
+  limits:
+  - default:
+      cpu: "200m"
+      memory: "256Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    type: Container
 
 ---
 
-### loadbalancer-service.yaml
+### production-namespace-security.yaml
 apiVersion: v1
-kind: Service
+kind: Namespace
 metadata:
-  name: nginx-loadbalancer
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+  name: production
+  labels:
+    environment: production
+    security.policy/level: "high"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-default
+  namespace: production
 spec:
-  type: LoadBalancer
-  selector:
-    app: nginx
-  ports:
-  - port: 80
-    targetPort: 80
-    protocol: TCP
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  # Default deny-all, explicit allow rules required
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: production
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: production
 
 ---
 
-## Deployment Examples
+## Sidecar Pattern Examples
 
-### basic-deployment.yaml
+### advanced-sidecar-logging.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/nginx/access.log
+        Parser            nginx
+        Tag               nginx.access
+        Refresh_Interval  5
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/nginx/error.log
+        Tag               nginx.error
+        Refresh_Interval  5
+
+    [OUTPUT]
+        Name  es
+        Match *
+        Host  elasticsearch.logging.svc.cluster.local
+        Port  9200
+        Index nginx-logs
+        Type  _doc
+
+  parsers.conf: |
+    [PARSER]
+        Name        nginx
+        Format      regex
+        Regex       ^(?<remote>[^ ]*) (?<host>[^ ]*) (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^\"]*?)(?: +\S*)?)?" (?<code>[^ ]*) (?<size>[^ ]*)(?: "(?<referer>[^\"]*)" "(?<agent>[^\"]*)")?$
+        Time_Key    time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nginx-deployment
-  labels:
-    app: nginx
+  name: web-app-with-structured-logging
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: nginx
+      app: web-app
   template:
     metadata:
       labels:
-        app: nginx
+        app: web-app
     spec:
       containers:
-      - name: nginx
-        image: nginx:1.21
+      - name: web-application
+        image: nginx:1.22
         ports:
         - containerPort: 80
+        volumeMounts:
+        - name: app-logs
+          mountPath: /var/log/nginx
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      - name: log-processor
+        image: fluent/fluent-bit:2.0
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: "elasticsearch.logging.svc.cluster.local"
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: "9200"
+        ports:
+        - containerPort: 2020
+        volumeMounts:
+        - name: app-logs
+          mountPath: /var/log/nginx
+          readOnly: true
+        - name: fluent-config
+          mountPath: /fluent-bit/etc
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      volumes:
+      - name: app-logs
+        emptyDir: {}
+      - name: fluent-config
+        configMap:
+          name: fluent-bit-config
+      - name: nginx-config
+        configMap:
+          name: nginx-custom-config
+
+---
+
+### istio-sidecar-injection.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: microservice-with-proxy
+  annotations:
+    sidecar.istio.io/inject: "true"
+  labels:
+    app: microservice
+    version: v1
+spec:
+  containers:
+  - name: business-logic
+    image: myapp:v1.2
+    ports:
+    - containerPort: 8080
+    env:
+    - name: SERVICE_NAME
+      value: "microservice"
+    - name: SERVICE_VERSION
+      value: "v1"
+    # Application focuses purely on business logic
+    # Istio sidecar handles:
+    # - mTLS encryption/decryption
+    # - Traffic routing and load balancing
+    # - Observability (metrics, tracing)
+    # - Security policies enforcement
+
+---
+
+## Ambassador Pattern Examples
+
+### postgres-connection-pool-ambassador.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbouncer-config
+data:
+  pgbouncer.ini: |
+    [databases]
+    mydb = host=postgres-primary.database.svc.cluster.local port=5432 dbname=mydb
+    
+    [pgbouncer]
+    listen_port = 5432
+    listen_addr = 0.0.0.0
+    auth_type = trust
+    pool_mode = transaction
+    max_client_conn = 100
+    default_pool_size = 5
+    max_db_connections = 10
+    server_round_robin = 1
+    ignore_startup_parameters = extra_float_digits
+    
+  userlist.txt: |
+    "postgres" ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-with-db-ambassador
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-app-db
+  template:
+    metadata:
+      labels:
+        app: web-app-db
+    spec:
+      containers:
+      - name: application
+        image: my-web-app:latest
+        env:
+        - name: DATABASE_URL
+          value: "postgres://postgres@localhost:5432/mydb"
+        ports:
+        - containerPort: 8080
+      - name: postgres-ambassador
+        image: pgbouncer/pgbouncer:latest
+        ports:
+        - containerPort: 5432
+        env:
+        - name: DATABASES_HOST
+          value: "postgres-primary.database.svc.cluster.local"
+        - name: DATABASES_PORT
+          value: "5432"
+        volumeMounts:
+        - name: pgbouncer-config
+          mountPath: /etc/pgbouncer
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "25m"
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
+      volumes:
+      - name: pgbouncer-config
+        configMap:
+          name: pgbouncer-config
+
+---
+
+## Adapter Pattern Examples
+
+### legacy-format-adapter.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: format-adapter-script
+data:
+  convert.sh: |
+    #!/bin/bash
+    while true; do
+      if [ -f /data/input/output.json ]; then
+        # Convert new JSON format to legacy XML
+        jq -r '
+          {
+            "LegacyResponse": {
+              "Status": .status,
+              "Data": .data,
+              "Timestamp": .timestamp,
+              "Version": "1.0"
+            }
+          }
+        ' /data/input/output.json | \
+        yq eval -P > /data/output/legacy-output.xml
+        
+        echo "$(date): Converted JSON to legacy XML format"
+        rm /data/input/output.json
+      fi
+      sleep 2
+    done
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: legacy-integration-pod
+spec:
+  containers:
+  - name: new-application
+    image: modern-microservice:v2.0
+    # Produces JSON output in new format
+    volumeMounts:
+    - name: shared-data
+      mountPath: /app/output
+      subPath: input
+  - name: legacy-adapter
+    image: adapter-tools:latest
+    command: ["/bin/bash"]
+    args: ["/scripts/convert.sh"]
+    volumeMounts:
+    - name: shared-data
+      mountPath: /data
+    - name: adapter-scripts
+      mountPath: /scripts
+  volumes:
+  - name: shared-data
+    emptyDir: {}
+  - name: adapter-scripts
+    configMap:
+      name: format-adapter-script
+      defaultMode: 0755
+
+---
+
+## Multi-Node Patterns Examples
+
+### leader-election-pattern.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: distributed-coordinator
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: coordinator
+  template:
+    metadata:
+      labels:
+        app: coordinator
+    spec:
+      containers:
+      - name: coordinator
+        image: leader-election-app:latest
+        env:
+        - name: LEASE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: LEASE_NAME
+          value: "coordinator-leader-election"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        command: ["./coordinator"]
+        args: 
+        - "--leader-elect=true"
+        - "--leader-elect-resource-name=coordinator-leader-election"
+        - "--leader-elect-resource-namespace=$(LEASE_NAMESPACE)"
+        - "--leader-elect-lease-duration=15s"
+        - "--leader-elect-renew-deadline=10s"
+        - "--leader-elect-retry-period=2s"
+
+---
+
+### scatter-gather-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-processing-scatter-gather
+spec:
+  parallelism: 10
+  completions: 10
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: data-processor:latest
+        env:
+        - name: WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: TASK_QUEUE_URL
+          value: "redis://task-queue.default.svc.cluster.local:6379"
+        - name: RESULT_STORE_URL
+          value: "redis://result-store.default.svc.cluster.local:6379"
+        command: ["python3"]
+        args:
+        - "-c"
+        - |
+          import redis
+          import json
+          import os
+          
+          worker_id = os.environ['WORKER_ID']
+          task_queue = redis.Redis.from_url(os.environ['TASK_QUEUE_URL'])
+          result_store = redis.Redis.from_url(os.environ['RESULT_STORE_URL'])
+          
+          # Scatter: Get work from queue
+          while True:
+              task = task_queue.blpop('work_queue', timeout=30)
+              if not task:
+                  break
+              
+              # Process the work
+              work_data = json.loads(task[1])
+              result = process_work(work_data)
+              
+              # Gather: Store result
+              result_store.rpush('results', json.dumps({
+                  'worker_id': worker_id,
+                  'result': result
+              }))
+      restartPolicy: OnFailure
+
+---
+
+## Advanced Scheduling Examples
+
+### advanced-pod-scheduling.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: high-priority-app
+spec:
+  priorityClassName: high-priority
+  nodeSelector:
+    node-type: cpu-optimized
+    zone: us-west-1a
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values:
+            - amd64
+          - key: node.kubernetes.io/instance-type
+            operator: In
+            values:
+            - c5.large
+            - c5.xlarge
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+          - key: app
+            operator: In
+            values:
+            - high-priority-app
+        topologyKey: kubernetes.io/hostname
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: component
+              operator: In
+              values:
+              - cache
+          topologyKey: kubernetes.io/hostname
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "high-priority"
+    effect: "NoSchedule"
+  containers:
+  - name: app
+    image: high-priority-app:latest
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+
+---
+
+### priority-class.yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+description: "This priority class should be used for critical applications."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: medium-priority
+value: 500000
+globalDefault: false
+description: "This priority class should be used for important applications."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+value: 100000
+globalDefault: true
+description: "This priority class should be used for non-critical applications."
+
+---
+
+## RBAC and Security Examples
+
+### rbac-developer-permissions.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: development
+  name: developer-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/log", "pods/exec"]
+  verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-binding
+  namespace: development
+subjects:
+- kind: User
+  name: jane.doe@company.com
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: developers
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: developer-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+### pod-security-standards.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-namespace
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-app
+  namespace: secure-namespace
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secure-app
+  template:
+    metadata:
+      labels:
+        app: secure-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        image: nginx:1.22
+        ports:
+        - containerPort: 8080
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          runAsGroup: 65534
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - NET_BIND_SERVICE
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: cache-volume
+          mountPath: /var/cache/nginx
+        - name: run-volume
+          mountPath: /var/run
         resources:
           requests:
             memory: "128Mi"
@@ -145,421 +679,340 @@ spec:
           limits:
             memory: "256Mi"
             cpu: "200m"
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 5
-          periodSeconds: 5
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      - name: cache-volume
+        emptyDir: {}
+      - name: run-volume
+        emptyDir: {}
 
 ---
 
-### rolling-update-deployment.yaml
+## Service Mesh Integration Examples
+
+### istio-virtual-service.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: microservice-routing
+spec:
+  hosts:
+  - microservice.example.com
+  http:
+  - match:
+    - headers:
+        version:
+          exact: "v2"
+    route:
+    - destination:
+        host: microservice
+        subset: v2
+      weight: 100
+  - match:
+    - uri:
+        prefix: "/api/v1/"
+    route:
+    - destination:
+        host: microservice
+        subset: v1
+      weight: 90
+    - destination:
+        host: microservice
+        subset: v2
+      weight: 10
+    fault:
+      delay:
+        percentage:
+          value: 0.1
+        fixedDelay: 5s
+  - route:
+    - destination:
+        host: microservice
+        subset: v1
+      weight: 100
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: microservice-destination
+spec:
+  host: microservice
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 10
+    circuitBreaker:
+      consecutiveErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+    trafficPolicy:
+      connectionPool:
+        tcp:
+          maxConnections: 50
+  - name: v2
+    labels:
+      version: v2
+    trafficPolicy:
+      connectionPool:
+        tcp:
+          maxConnections: 100
+
+---
+
+## Monitoring and Observability
+
+### prometheus-monitoring.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - "kubernetes.rules"
+
+    scrape_configs:
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+        - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+
+  kubernetes.rules: |
+    groups:
+    - name: kubernetes
+      rules:
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Pod {{ $labels.pod }} is crash looping
+
+---
+
+## Cloud Provider Integration Examples
+
+### aws-load-balancer-controller.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-service
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:us-west-2:123456789:certificate/12345678-1234-1234-1234-123456789012"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 443
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app: web
+
+---
+
+## Production-Ready Examples
+
+### e-commerce-microservice-stack.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ecommerce
+  labels:
+    environment: production
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: webapp-rolling-update
+  name: frontend
+  namespace: ecommerce
 spec:
-  replicas: 5
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 1
-      maxSurge: 2
+      maxSurge: 1
   selector:
     matchLabels:
-      app: webapp
+      app: frontend
+      tier: web
   template:
     metadata:
       labels:
-        app: webapp
-        version: v2
+        app: frontend
+        tier: web
+        version: v2.1.0
     spec:
       containers:
-      - name: webapp
-        image: nginx:1.22
+      - name: frontend
+        image: ecommerce-frontend:v2.1.0
         ports:
-        - containerPort: 80
-
----
-
-## StatefulSet Example
-
-### mysql-statefulset.yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: mysql-statefulset
-spec:
-  serviceName: mysql-headless
-  replicas: 3
-  selector:
-    matchLabels:
-      app: mysql
-  template:
-    metadata:
-      labels:
-        app: mysql
-    spec:
-      containers:
-      - name: mysql
-        image: mysql:8.0
+        - containerPort: 3000
         env:
-        - name: MYSQL_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: password
-        ports:
-        - containerPort: 3306
-        volumeMounts:
-        - name: mysql-storage
-          mountPath: /var/lib/mysql
-  volumeClaimTemplates:
-  - metadata:
-      name: mysql-storage
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      resources:
-        requests:
-          storage: 10Gi
-
+        - name: NODE_ENV
+          value: "production"
+        - name: API_URL
+          value: "http://api.ecommerce.svc.cluster.local:8080"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
 ---
-
-### mysql-headless-service.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: mysql-headless
+  name: frontend
+  namespace: ecommerce
 spec:
-  clusterIP: None
-  selector:
-    app: mysql
+  type: ClusterIP
   ports:
-  - port: 3306
-    targetPort: 3306
-
----
-
-## DaemonSet Example
-
-### node-exporter-daemonset.yaml
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: node-exporter
-  namespace: monitoring
-  labels:
-    app: node-exporter
-spec:
+  - port: 80
+    targetPort: 3000
   selector:
-    matchLabels:
-      app: node-exporter
-  template:
-    metadata:
-      labels:
-        app: node-exporter
-    spec:
-      hostNetwork: true
-      hostPID: true
-      containers:
-      - name: node-exporter
-        image: prom/node-exporter:v1.3.1
-        ports:
-        - containerPort: 9100
-          hostPort: 9100
-        args:
-        - --path.rootfs=/host
-        - --collector.filesystem.ignored-mount-points
-        - ^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)
-        volumeMounts:
-        - name: proc
-          mountPath: /host/proc
-          readOnly: true
-        - name: sys
-          mountPath: /host/sys
-          readOnly: true
-        - name: root
-          mountPath: /host
-          readOnly: true
-      volumes:
-      - name: proc
-        hostPath:
-          path: /proc
-      - name: sys
-        hostPath:
-          path: /sys
-      - name: root
-        hostPath:
-          path: /
+    app: frontend
 
 ---
 
-## ConfigMap Examples
+## Kubectl Commands for Advanced Architecture Patterns
 
-### nginx-configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nginx-config
-data:
-  nginx.conf: |
-    events {
-        worker_connections 1024;
-    }
-    http {
-        server {
-            listen 80;
-            server_name localhost;
-            
-            location / {
-                root /usr/share/nginx/html;
-                index index.html;
-            }
-            
-            location /health {
-                access_log off;
-                return 200 "healthy\n";
-                add_header Content-Type text/plain;
-            }
-        }
-    }
-  index.html: |
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Welcome to Kubernetes</title>
-    </head>
-    <body>
-        <h1>Hello from Kubernetes Pod!</h1>
-        <p>Pod Name: ${POD_NAME}</p>
-        <p>Node Name: ${NODE_NAME}</p>
-    </body>
-    </html>
+# Namespace and Multi-tenancy Management
+kubectl create namespace production --dry-run=client -o yaml
+kubectl apply -f namespace-with-quota.yaml
+kubectl get resourcequotas -n development
+kubectl describe limitrange dev-limit-range -n development
+kubectl get networkpolicies -n production
+kubectl auth can-i create pods --namespace=development --as=system:serviceaccount:development:developer
 
----
+# Sidecar Pattern Management  
+kubectl exec -it webapp-with-logging -c webapp -- /bin/bash
+kubectl exec -it webapp-with-logging -c log-shipper -- /bin/sh
+kubectl logs webapp-with-logging -c webapp --follow --tail=100
+kubectl logs webapp-with-logging -c log-shipper --since=1h
+kubectl port-forward webapp-with-logging 2020:2020  # Access Fluent Bit metrics
 
-### app-config.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: app-config
-data:
-  DATABASE_HOST: "mysql-service"
-  DATABASE_PORT: "3306"
-  DATABASE_NAME: "myapp"
-  CACHE_ENABLED: "true"
-  CACHE_TTL: "3600"
-  LOG_LEVEL: "info"
-  APP_ENV: "production"
+# Ambassador Pattern Debugging
+kubectl exec -it app-with-db-ambassador -c postgres-ambassador -- psql -h localhost -U postgres -d mydb
+kubectl logs app-with-db-ambassador -c postgres-ambassador
+kubectl describe pod app-with-db-ambassador
+kubectl get configmap pgbouncer-config -o yaml
 
----
+# Advanced Scheduling and Priority
+kubectl get priorityclasses
+kubectl describe priorityclass high-priority  
+kubectl get pods --field-selector spec.priorityClassName=high-priority
+kubectl describe node worker-node-1 | grep -A 10 "Non-terminated Pods"
+kubectl get pods -o wide --sort-by=.spec.priority
+kubectl top pods --sort-by=cpu
+kubectl get events --field-selector involvedObject.kind=Pod --sort-by='.lastTimestamp'
 
-## Secret Examples
+# RBAC and Security
+kubectl auth can-i create deployments --namespace=development
+kubectl auth can-i '*' '*' --as=system:serviceaccount:development:developer
+kubectl get roles,rolebindings -n development
+kubectl get clusterroles | grep developer
+kubectl describe clusterrolebinding developer-cluster-binding
+kubectl get pods --field-selector spec.securityContext.runAsNonRoot=true
 
-### mysql-secret.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mysql-secret
-type: Opaque
-data:
-  username: cm9vdA==  # base64 encoded 'root'
-  password: bXlwYXNzd29yZA==  # base64 encoded 'mypassword'
+# Control Loop and Custom Controllers
+kubectl get leases -n kube-system
+kubectl describe lease coordinator-leader-election
+kubectl logs -f deployment/webapp-controller
+kubectl get customresourcedefinitions
+kubectl api-resources --verbs=list --namespaced -o name
 
----
+# Service Mesh and Networking
+kubectl get virtualservices
+kubectl get destinationrules  
+kubectl describe virtualservice microservice-routing
+kubectl get pods -l app=microservice -o jsonpath='{.items[*].metadata.annotations.sidecar\.istio\.io/status}'
 
-### tls-secret.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: tls-secret
-type: kubernetes.io/tls
-data:
-  tls.crt: LS0tLS1CRUdJTi... # base64 encoded certificate
-  tls.key: LS0tLS1CRUdJTi... # base64 encoded private key
-
----
-
-### docker-registry-secret.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: docker-registry-secret
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: eyJhdXRocyI6eyJyZWdpc3RyeS5leGFtcGxlLmNvbSI6eyJ1c2VybmFtZSI6InVzZXIiLCJwYXNzd29yZCI6InBhc3MiLCJhdXRoIjoiZFhObGNqcHdZWE56In19fQ==
-
----
-
-## Job Examples
-
-### backup-job.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: database-backup-job
-spec:
-  template:
-    spec:
-      containers:
-      - name: backup
-        image: postgres:13
-        command: ["sh", "-c"]
-        args:
-        - |
-          pg_dump -h $DATABASE_HOST -U $DATABASE_USER $DATABASE_NAME > /backup/backup-$(date +%Y%m%d-%H%M%S).sql
-        env:
-        - name: DATABASE_HOST
-          value: "postgres-service"
-        - name: DATABASE_USER
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secret
-              key: username
-        - name: PGPASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secret
-              key: password
-        - name: DATABASE_NAME
-          value: "myapp"
-        volumeMounts:
-        - name: backup-storage
-          mountPath: /backup
-      volumes:
-      - name: backup-storage
-        persistentVolumeClaim:
-          claimName: backup-pvc
-      restartPolicy: OnFailure
-
----
-
-### parallel-job.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: parallel-processing-job
-spec:
-  parallelism: 3
-  completions: 9
-  template:
-    spec:
-      containers:
-      - name: worker
-        image: busybox
-        command: ["sh", "-c"]
-        args:
-        - |
-          echo "Processing item $RANDOM"
-          sleep 30
-          echo "Processing complete"
-      restartPolicy: OnFailure
-
----
-
-## CronJob Examples
-
-### scheduled-backup-cronjob.yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: scheduled-backup
-spec:
-  schedule: "0 2 * * *"  # Daily at 2 AM
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: backup
-            image: postgres:13
-            command: ["sh", "-c"]
-            args:
-            - |
-              timestamp=$(date +%Y%m%d-%H%M%S)
-              pg_dump -h $DATABASE_HOST -U $DATABASE_USER $DATABASE_NAME > /backup/backup-$timestamp.sql
-              echo "Backup completed: backup-$timestamp.sql"
-            env:
-            - name: DATABASE_HOST
-              value: "postgres-service"
-            - name: DATABASE_USER
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-secret
-                  key: username
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-secret
-                  key: password
-            - name: DATABASE_NAME
-              value: "myapp"
-            volumeMounts:
-            - name: backup-storage
-              mountPath: /backup
-          volumes:
-          - name: backup-storage
-            persistentVolumeClaim:
-              claimName: backup-pvc
-          restartPolicy: OnFailure
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 1
-
----
-
-## Kubectl Command Examples
-
-# Basic kubectl commands for Chapter 1 concepts
-
-# Pod Management
-kubectl get pods
-kubectl get pods -o wide
-kubectl describe pod <pod-name>
-kubectl logs <pod-name>
-kubectl logs <pod-name> -c <container-name>
-kubectl exec -it <pod-name> -- /bin/bash
-kubectl delete pod <pod-name>
-
-# Service Management
-kubectl get services
-kubectl get svc
-kubectl describe service <service-name>
-kubectl get endpoints
-kubectl port-forward service/<service-name> 8080:80
-
-# Deployment Management
-kubectl get deployments
-kubectl describe deployment <deployment-name>
-kubectl scale deployment <deployment-name> --replicas=5
-kubectl rollout status deployment/<deployment-name>
-kubectl rollout history deployment/<deployment-name>
-kubectl rollout undo deployment/<deployment-name>
-
-# ConfigMap and Secret Management
-kubectl create configmap app-config --from-literal=key1=value1
-kubectl create secret generic app-secret --from-literal=password=secret123
-kubectl get configmaps
-kubectl get secrets
-kubectl describe configmap <configmap-name>
-
-# Resource Management
-kubectl get all
-kubectl get all -n <namespace>
-kubectl apply -f <filename.yaml>
-kubectl delete -f <filename.yaml>
-kubectl create namespace <namespace-name>
-
-# Debugging and Troubleshooting
-kubectl get events
-kubectl get events --sort-by='.lastTimestamp'
+# Monitoring and Observability
+kubectl port-forward svc/prometheus 9090:9090
+kubectl get servicemonitors
+kubectl describe servicemonitor webapp-metrics
 kubectl top nodes
-kubectl top pods
-kubectl describe node <node-name>
+kubectl top pods --containers
+kubectl get events --sort-by='.lastTimestamp' | tail -20
+
+# Advanced Troubleshooting Commands
+kubectl describe nodes | grep -A 5 "Allocated resources"
+kubectl get pods -o wide --field-selector spec.nodeName=worker-1
+kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data
+kubectl uncordon worker-1
+kubectl rollout restart deployment/frontend -n ecommerce
+kubectl rollout status deployment/frontend -n ecommerce --watch
+kubectl scale deployment frontend --replicas=5 -n ecommerce
+
+# Multi-node Pattern Debugging
+kubectl get jobs -o wide
+kubectl describe job data-processing-scatter-gather
+kubectl logs job/data-processing-scatter-gather --all-containers=true
+kubectl get lease coordinator-leader-election -o yaml
+kubectl exec -it coordinator-pod -- env | grep LEASE
+
+# Production Operations
+kubectl create secret generic db-credentials --from-literal=username=admin --from-literal=password=secret123 --dry-run=client -o yaml
+kubectl patch deployment frontend -p '{"spec":{"template":{"metadata":{"labels":{"version":"v2.1.1"}}}}}'  -n ecommerce
+kubectl rollout undo deployment/frontend -n ecommerce
+kubectl get horizontalpodautoscalers
+kubectl autoscale deployment frontend --cpu-percent=70 --min=3 --max=10 -n ecommerce
+
+# Image Management and Registry
+kubectl create secret docker-registry registry-secret --docker-server=registry.company.com --docker-username=admin --docker-password=password123
+kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "registry-secret"}]}'
+
+# Final verification and cleanup commands
+kubectl get all -n ecommerce
+kubectl delete namespace ecommerce --cascade=foreground
+kubectl cluster-info
+kubectl version --short
